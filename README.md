@@ -1,4 +1,4 @@
-# aws
+# aws [![Build Status](https://travis-ci.org/theaaf/aws.svg?branch=master)](https://travis-ci.org/theaaf/aws)
 
 This is where general purpose AWS infrastructure components that The Alliance uses lives. It's open sourced in hopes that others may find it useful. In each directory, you'll find a README describing the functionality and deployment method for each component (in most cases, a CloudFormation template and a description of its parameters).
 

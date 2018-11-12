@@ -1,0 +1,9 @@
+language: python
+jobs:
+  include:
+    - if: env(AWS_SECRET_ACCESS_KEY) IS present
+      stage: validate-cfn-templates
+      name: Validate CloudFormation Templates
+      script:
+        - pip install awscli
+        - find . -type f -iname '*.cfn.yaml' -print0 | xargs -0 -n1 sh -c 'aws cloudformation validate-template --template-body file://$0'
