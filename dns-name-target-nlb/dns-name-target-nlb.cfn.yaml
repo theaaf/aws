@@ -1,0 +1,110 @@
+Description: github.com/theaaf/aws
+Parameters:
+  DNSName:
+    Type: String
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+  VPC:
+    Type: AWS::EC2::VPC::Id
+Resources:
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Subnets: !Ref Subnets
+      Type: network
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref LoadBalancerTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: TCP
+  LoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      Port: 443
+      Protocol: TCP
+      TargetType: ip
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPC
+  SyncEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 minute)
+      Targets:
+        - Arn: !GetAtt SyncFunction.Arn
+          Id: !Ref SyncFunction
+  SyncEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SyncFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SyncEvent.Arn
+  SyncFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          import socket
+
+          def handler(event, context):
+              elbv2 = boto3.client('elbv2')
+
+              current_targets = elbv2.describe_target_health(TargetGroupArn='${LoadBalancerTargetGroup}')['TargetHealthDescriptions']
+              current_target_ips = set([x['Target']['Id'] for x in current_targets])
+              print('current ips:', current_target_ips)
+              
+              dns_results = socket.getaddrinfo('${DNSName}', 443, 0, 0)
+              desired_target_ips = set([x[4][0] for x in dns_results])
+              print('desired ips:', desired_target_ips)
+
+              new_targets = []
+              for ip in desired_target_ips:
+                  if ip not in current_target_ips:
+                      print('registering ip:', ip)
+                      new_targets.append({
+                          'Id': ip,
+                      })
+              if len(new_targets) > 0:
+                  elbv2.register_targets(TargetGroupArn='${LoadBalancerTargetGroup}', Targets=new_targets)
+
+              old_targets = []
+              for target in current_targets:
+                  if target['Target']['Id'] not in desired_target_ips:
+                      old_targets.append(target['Target'])
+              if len(old_targets) > 0:
+                  elbv2.deregister_targets(TargetGroupArn='${LoadBalancerTargetGroup}', Targets=old_targets)
+      Handler: index.handler
+      Role: !GetAtt SyncRole.Arn
+      Runtime: python3.6
+      Timeout: 30
+  SyncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: sync-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:Describe*
+                  - elasticloadbalancing:RegisterTargets
+                  - elasticloadbalancing:DeregisterTargets
+                Resource: '*' 

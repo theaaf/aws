@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: github.com/theaaf/aws
+Parameters:
+  DatadogAPIKey:
+    Type: String
+    NoEcho: true
+  ECSCluster:
+    Type: String
+Resources:
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+  Service:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt ServiceResource.Arn
+      Cluster: !Ref ECSCluster
+      ServiceName: !Ref AWS::StackName
+      SchedulingStrategy: DAEMON
+      TaskDefinition: !Ref TaskDefinition
+  ServiceResource:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt ServiceResourceRole.Arn
+      Runtime: python3.6
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+
+          from botocore.vendored import requests
+
+          def send(event, context, responseStatus, responseData, physicalResourceId=None, noEcho=False):
+              responseUrl = event['ResponseURL']
+
+              print(responseUrl)
+
+              responseBody = {}
+              responseBody['Status'] = responseStatus
+              responseBody['Reason'] = 'See the details in CloudWatch Log Stream: ' + context.log_stream_name
+              responseBody['PhysicalResourceId'] = physicalResourceId or context.log_stream_name
+              responseBody['StackId'] = event['StackId']
+              responseBody['RequestId'] = event['RequestId']
+              responseBody['LogicalResourceId'] = event['LogicalResourceId']
+              responseBody['NoEcho'] = noEcho
+              responseBody['Data'] = responseData
+
+              json_responseBody = json.dumps(responseBody)
+
+              print("Response body:\n" + json_responseBody)
+
+              headers = {
+                  'content-type' : '',
+                  'content-length' : str(len(json_responseBody))
+              }
+
+              try:
+                  response = requests.put(responseUrl,
+                                          data=json_responseBody,
+                                          headers=headers)
+                  print("Status code: " + response.reason)
+              except Exception as e:
+                  print("send(..) failed executing requests.put(..): " + str(e))
+
+          def requires_new_resource(event):
+              if event['RequestType'] == 'Create':
+                  return True
+
+              if event['RequestType'] == 'Update':
+                  new_props = event['ResourceProperties']
+                  old_props = event['OldResourceProperties']
+
+                  for key in ['Cluster', 'ServiceName', 'SchedulingStrategy']:
+                      if new_props[key] != old_props[key]:
+                          return True
+
+              return False
+
+          def handler(event, context):
+              print(event)
+
+              props = event['ResourceProperties']
+
+              try:
+                  ecs = boto3.client('ecs')
+                  if requires_new_resource(event):
+                      response = ecs.create_service(
+                          cluster=props['Cluster'],
+                          serviceName=props['ServiceName'],
+                          taskDefinition=props['TaskDefinition'],
+                          schedulingStrategy=props['SchedulingStrategy'],
+                      )
+                      send(event, context, 'SUCCESS', {}, response['service']['serviceArn'])
+                  elif event['RequestType'] == 'Update':
+                      ecs.update_service(
+                          cluster=props['Cluster'],
+                          service=props['ServiceName'],
+                          taskDefinition=props['TaskDefinition'],
+                      )
+                      send(event, context, 'SUCCESS', {}, event['PhysicalResourceId'])
+                  elif event['RequestType'] == 'Delete':
+                      if 'arn:aws:ecs' in event['PhysicalResourceId']:
+                          ecs.delete_service(
+                              cluster=props['Cluster'],
+                              service=props['ServiceName'],
+                          )
+                      send(event, context, 'SUCCESS', {}, event['PhysicalResourceId'])
+                  else:
+                      send(event, context, 'FAILED', {})
+              except:
+                  send(event, context, 'FAILED', {})
+                  raise
+  ServiceResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: service-resource-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:CreateService
+                  - ecs:UpdateService
+                  - ecs:DeleteService
+                Resource: '*'
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Name: datadog-agent
+          Image: datadog/agent
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Ref AWS::StackName
+          Cpu: 10
+          Memory: 256
+          Essential: true
+          MountPoints:
+            - ContainerPath: /var/run/docker.sock
+              SourceVolume: docker_sock
+              ReadOnly: true
+            - ContainerPath: /host/sys/fs/cgroup
+              SourceVolume: cgroup
+              ReadOnly: true
+            - ContainerPath: /host/proc
+              SourceVolume: proc
+              ReadOnly: true
+          Environment:
+            - Name: DD_API_KEY
+              Value: !Ref DatadogAPIKey
+            - Name: SD_BACKEND
+              Value: docker
+            - Name: DD_LOGS_STDOUT
+              Value: 'yes'
+      Family: !Ref AWS::StackName
+      TaskRoleArn: !Ref TaskRole
+      Volumes:
+        - Host:
+            SourcePath: /var/run/docker.sock
+          Name: docker_sock
+        - Host:
+            SourcePath: /proc/
+          Name: proc
+        - Host:
+            SourcePath: /cgroup/
+          Name: cgroup
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: task
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt LogGroup.Arn

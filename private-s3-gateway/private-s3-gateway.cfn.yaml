@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: github.com/theaaf/aws
+Parameters:
+  S3Bucket:
+    Type: String
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+  VPC:
+    Type: AWS::EC2::VPC::Id
+Resources:
+  API:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Ref AWS::StackName
+      EndpointConfiguration:
+        Types:
+          - PRIVATE
+      Policy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "execute-api:Invoke",
+            "Resource": "execute-api:/*/*/*"
+          }, {
+            "Effect": "Deny",
+            "Principal": "*",
+            "Action": "execute-api:Invoke",
+            "Resource": "execute-api:/*/*/*",
+            "Condition" : {
+              "StringNotEquals": {
+                "aws:SourceVpce": "${VPCEndpoint}"
+              }
+            }
+          }]
+        }
+  APIAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt APICloudWatchRole.Arn
+  APICloudWatchRole: 
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: Allow
+            Principal: 
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+  APIGETRole: 
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: Allow
+            Principal: 
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: api-proxy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${S3Bucket}
+                  - !Sub arn:aws:s3:::${S3Bucket}/*
+  APIGETResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt API.RootResourceId
+      PathPart: '{proxy+}'
+      RestApiId: !Ref API
+  APIGETMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        CacheKeyParameters:
+          - method.request.path.proxy
+        Credentials: !GetAtt APIGETRole.Arn
+        Type: AWS
+        IntegrationHttpMethod: GET
+        IntegrationResponses:
+          - StatusCode: 200
+          - StatusCode: 404
+            SelectionPattern: '404'
+        RequestParameters:
+          integration.request.path.proxy: method.request.path.proxy
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:s3:path/${S3Bucket}/{proxy}
+      MethodResponses:
+        - StatusCode: 200
+        - StatusCode: 404
+      RequestParameters:
+        method.request.path.proxy: true
+      ResourceId: !Ref APIGETResource
+      RestApiId: !Ref API
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - APIGETMethod
+    Properties:
+      RestApiId: !Ref API
+  APIStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn:
+      - APIAccount
+    Properties:
+      DeploymentId: !Ref APIDeployment
+      MethodSettings:
+        - HttpMethod: '*'
+          LoggingLevel: ERROR
+          MetricsEnabled: true
+          ResourcePath: /*
+      RestApiId: !Ref API
+      StageName: stage
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Ref AWS::StackName
+      SecurityGroupIngress:
+        - FromPort: 443
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+          ToPort: 443
+      VpcId: !Ref VPC
+  VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.execute-api
+      SubnetIds: !Ref Subnets
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
