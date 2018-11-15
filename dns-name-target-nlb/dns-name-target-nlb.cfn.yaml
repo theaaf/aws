@@ -105,6 +105,9 @@ Resources:
               - Effect: Allow
                 Action:
                   - elasticloadbalancing:Describe*
+                Resource: '*' 
+              - Effect: Allow
+                Action:
                   - elasticloadbalancing:RegisterTargets
                   - elasticloadbalancing:DeregisterTargets
-                Resource: '*' 
+                Resource: !Ref LoadBalancerTargetGroup
